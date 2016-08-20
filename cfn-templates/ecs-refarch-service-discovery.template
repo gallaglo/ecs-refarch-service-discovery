@@ -932,7 +932,147 @@
           }
         }]
       }
+    },
+  "RegisterServiceLamdaFunction": {
+    "Type" : "AWS::Lambda::Function",
+    "DependsOn" : ["DNS", "ECSCluster"],
+    "Properties" : {
+    "Description" : "Lambda Function for registering ECS services to Route 53 Private Hosted Zone",
+     "Code" : {
+       "ZipFile": { "Fn::Join": ["", [
+        "from __future__ import print_function\n",
+        "\n",
+        "import json\n",
+        "import boto3\n",
+        "\n",
+        "def handler(event, context):\n",
+        "\n",
+        " # spit out event data\n",
+        "print('Received event: ' + json.dumps(event, indent=2))\n",
+        "\n",
+        "# private hosted zone domain name and id\n",
+        "privatezone = '",{"Ref": "PrivateZone"},"'\n",
+        "zoneid = '",{"Ref": "DNS"},"'\n",
+        "cluster = '",{"Ref": "ECSCluster"},"'\n",
+        "\n",
+        "# grab load balancer and service names\n",
+        "lb = event['detail']['responseElements']['service']['loadBalancers'][0]['loadBalancerName']\n",
+        "service = event['detail']['responseElements']['service']['serviceName']\n",
+        "\n",
+        "# check we are working against the appropriate ecs cluster\n",
+        "if cluster != event['detail']['requestParameters']['cluster']:\n",
+        "\n",
+        "	print('This event does not apply to us. No action taken.')\n",
+        "	return 0\n",
+        "\n",
+        "# grab DNS name for load balancer\n",
+        "elbclient = boto3.client('elb')\n",
+        "describelb = elbclient.describe_load_balancers(\n",
+        "	LoadBalancerNames=[\n",
+        "		lb\n",
+        "	]\n",
+        ")\n",
+        "lbcanonical = describelb['LoadBalancerDescriptions'][0]['DNSName']\n",
+        "servicerecord = service + '.' + privatezone + '.'\n",
+        "\n",
+        "# grab type of event\n",
+        "eventname = event['detail']['eventName']\n",
+        "\n",
+        "# boto connect to route53\n",
+        "route53client = boto3.client('route53')\n",
+        "\n",
+        "# create/update record\n",
+        "if eventname == 'CreateService':\n",
+        "\n",
+        "	response = route53client.change_resource_record_sets(\n",
+        "		HostedZoneId=zoneid,\n",
+        "		ChangeBatch={\n",
+        "			'Comment' : 'ECS service registered',\n",
+        "			'Changes' : [\n",
+        "				{\n",
+        "					'Action' : 'UPSERT',\n",
+        "					'ResourceRecordSet' : {\n",
+        "						'Name' : servicerecord,\n",
+        "						'Type' : 'CNAME',\n",
+        "						'TTL' : 60,\n",
+        "						'ResourceRecords' : [\n",
+        "							{\n",
+        "								'Value' : lbcanonical\n",
+        "							}\n",
+        "						]\n",
+        "					}\n",
+        "				}\n",
+        "			]\n",
+        "		}\n",
+        "	)\n",
+        "\n",
+        "	print(response)\n",
+        "\n",
+        "# delete record\n",
+        "elif eventname == 'DeleteService':\n",
+        "\n",
+        "	response = route53client.change_resource_record_sets(\n",
+        "		HostedZoneId=zoneid,\n",
+        "		ChangeBatch={\n",
+        "			'Comment' : 'ECS service deregistered',\n",
+        "			'Changes' : [\n",
+        "				{\n",
+        "					'Action' : 'DELETE',\n",
+        "					'ResourceRecordSet' : {\n",
+        "						'Name' : servicerecord,\n",
+        "						'Type' : 'CNAME',\n",
+        "						'TTL' : 60,\n",
+        "						'ResourceRecords' : [\n",
+        "							{\n",
+        "								'Value' : lbcanonical\n",
+        "							}\n",
+        "						]\n",
+        "					}\n",
+        "				}\n",
+        "			]\n",
+        "		}\n",
+        "	)\n",
+        "\n",
+        "	print(response)\n",
+        "	return response\n",
+        "\n",
+        "else:\n",
+        "\n",
+        "		print('This event does not apply to us. No action taken.')\n",
+        "		return 0"
+      ]]}},
+      "Handler": "index.handler",
+      "Role": {"Ref": "LambdaServiceRole"},
+      "Runtime": "python2.7",
+      "Timeout": 10
     }
+  },
+  "CloudWatchEvent": {
+    "Type" : "AWS::Events::Rule",
+    "Properties" : {
+      "Description" : "Triggers Lambda Function When ECS Service Created or Deleted",
+      "EventPattern":
+        {
+          "detail-type": [
+            "AWS API Call via CloudTrail"
+          ],
+          "detail": {
+            "eventSource": [
+              "ecs.amazonaws.com"
+            ],
+            "eventName": [
+              "CreateService",
+              "DeleteService"
+            ]
+          }
+        },
+      "State": "ENABLED",
+       "Targets": [{
+         "Arn": { "Fn::GetAtt": ["RegisterServiceLamdaFunction", "Arn"] },
+         "Id": "TargetFunctionV1"
+       }]
+    }
+  }
   },
   "Outputs": {
     "LoadBalancerPortalAppUrl": {
@@ -1002,6 +1142,18 @@
       "Value": {
         "Ref": "LambdaServiceRole"
       }
+      },
+    "LambdaFunction": {
+      "Description": "Name of the Lambda function",
+      "Value": {
+        "Ref": "RegisterServiceLamdaFunction"
+      }
+    },
+    "CloudWatchEvent": {
+      "Description": "Name of Cloud Watch Event Rule",
+      "Value": {
+        "Ref": "CloudWatchEvent"
+      }
+    }
     }
   }
-}
